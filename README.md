@@ -4,7 +4,7 @@ This is a basic implementation of GATK best practices variant calling workflow i
 ## Benchmarking data  
 A small family trio dataset was retrieved from the Galaxy communinty tutorial [**Exome sequencing data analysis for diagnosing a genetic disease**](https://training.galaxyproject.org/training-material/topics/variant-analysis/tutorials/exome-seq/tutorial.html).  
 
-The dataset contains partial paired-end whole exome sequencing FASTQ files from a family trio (father - mother -proband) and the respective pedigree file and reference files for chromosome 18 (hg18) to run the pipeline.  
+The dataset contains partial paired-end whole exome sequencing FASTQ files from a family trio (father - mother - proband) and the respective pedigree file and reference files for chromosome 18 (hg18) to run the pipeline.  
 
 ## Workflow overview  
 ![alt text](https://github.com/irliampa/test_code/blob/main/test_data/pipeline_runtime/workflow.png)
