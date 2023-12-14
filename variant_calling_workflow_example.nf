@@ -10,6 +10,8 @@ params.pedigree = "$projectDir/test_data/data/pedigree.ped"
 params.outDir = "$projectDir/test_data/results"
 params.indexDir = "$projectDir/test_data/ref"
 params.genome = "$projectDir/test_data/ref/hg19_chr8.fasta"
+params.knownSites = "$projectDir/test_data/ref/1000G_phase1.snps.high_confidence.b37.chr18.vcf.gz"
+
 
  log.info """\
     VARIANT CALLING - N F   P I P E L I N E
@@ -195,6 +197,54 @@ process MARK_DUPLICATES {
 }
 
 
+/*
+ * Base recalibration using GATK4
+*/
+
+process BASERECALIBRATION {
+    publishDir "${params.outDir}/GATK_recalibration", mode:'copy'
+
+    input:
+    tuple val(sampleID), path(sampleFile), path(sampleIndex), path(sampleMetrics)
+    path(indexDir)
+    path(knownSites)
+
+    output: 
+    tuple val(sampleID), file('*_recal_data.table')
+
+    script:
+    """
+    /gatk/gatk BaseRecalibrator \
+        --input ${sampleID}_dupl.bam \
+        --output ${sampleID}_recal_data.table \
+        --reference ${indexDir}/*.fasta \
+        --known-sites ${indexDir}/${knownSites}
+    """
+}
+
+
+process BQSR {
+    publishDir "${params.outDir}/GATK_recalibration", mode:'copy'
+
+    input:
+    tuple val(sampleID), path(sampleFile), path(sampleIndex), path(sampleMetrics), path(sampleTable)
+    path(indexDir)
+    
+    output:
+    tuple val(sampleID), file('*_recal.bam'), file('*_recal.bai')
+
+    script:
+    """
+    /gatk/gatk ApplyBQSR \
+        --bqsr-recal-file ${sampleID}_recal_data.table \
+        --input ${sampleID}_dupl.bam \
+        --output ${sampleID}_recal.bam \
+        --reference ${indexDir}/*.fasta \
+        --create-output-bam-index true
+    """
+}
+
+
 println "Execution starts!"
 
 workflow {
@@ -204,14 +254,15 @@ workflow {
 	    
     refGenome = file("${params.genome}")
 	indexDir = Channel.value("${params.indexDir}")
+    knownSites = file("${params.knownSites}")
 
     trim_ch = TRIMMING(reads_ch)
-    trim_ch.view()
     fastqc_ch = FASTQC(reads_ch.join(trim_ch))
     MULTIQC(fastqc_ch.collect())
     align_ch = ALIGNMENT(trim_ch, refGenome, indexDir)
     convert_ch = SAM_TO_BAM(align_ch)
     rg_ch = ADD_READGROUPS(convert_ch, refGenome)
     dupl_ch = MARK_DUPLICATES(rg_ch)
-
+    recal_ch = BASERECALIBRATION(dupl_ch, indexDir, knownSites)
+    corr_ch = BQSR(dupl_ch.join(recal_ch), indexDir)
 }
