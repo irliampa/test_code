@@ -245,6 +245,105 @@ process BQSR {
 }
 
 
+process INDEX_BAM {
+    publishDir "${params.outDir}/GATK_recalibration", mode:'copy'
+
+    input:
+    tuple val(sampleID), path(bamFile)
+
+    output:
+    tuple val(sampleID), file('*_recal_sorted.bam'), file('*_recal_sorted.bai')
+
+    script:
+    """
+    samtools sort ${sampleID}_recal.bam -O bam > ${sampleID}_recal_sorted.bam 
+    samtools index ${sampleID}_recal_sorted.bam > ${sampleID}_recal_sorted.bai
+    """
+}
+
+
+/* 
+ * Pedigree-based Variant Calling info using GATK HaplotypeCaller
+*/
+
+process FAMILY_CALL {
+    publishDir "${params.outDir}/GATK_variant_calling", mode:'copy'
+
+    input:
+    tuple val(sampleID), path(sampleFile), path(sampleIndex), path(sampleTable)
+    path(pedFile)
+    path(indexDir)
+
+    output:
+    tuple val(sampleID), file('*_familyvariants.g.vcf'), file('*_familyvariants.g.vcf.idx')
+
+    script:
+    """
+    /gatk/gatk  HaplotypeCaller  \
+        --input ${sampleID}_recal.bam \
+        --output ${sampleID}_familyvariants.g.vcf \
+        --pedigree ${pedFile} \
+        --reference ${indexDir}/*.fasta \
+        -ERC GVCF \
+        --create-output-bam-index true \
+        --create-output-variant-index true \
+        --java-options "-Xmx8G"
+    """
+}
+
+
+/*
+ * Create cohort VCF 
+ */ 
+
+process COHORT_COMB {
+    publishDir "${params.outDir}/GATK_variant_calling", mode:'copy'
+
+    input:
+    tuple val(sampleID), path(gVCFFile), path(gVCFIndex)
+    path(indexDir)
+
+    output:
+    file('cohort.g.vcf.gz')
+    file('cohort.g.vcf.gz.tbi')
+    file('cohort.vcf.gz')
+    file('cohort.vcf.gz.tbi')
+
+    script:
+    """
+    /gatk/gatk  CombineGVCFs \
+        --variant ${sampleID}_familyvariants.g.vcf \
+        --reference ${indexDir}/*.fasta \
+        --output cohort.g.vcf.gz
+    /gatk/gatk GenotypeGVCFs \
+        --reference ${indexDir}/*.fasta \
+        --variant cohort.g.vcf.gz \
+        --output cohort.vcf.gz
+    """
+}
+
+
+/* 
+ * Variant Calling using parallel FREEBAYES
+ */
+
+process FREEBAYES { 
+    publishDir "${params.outDir}/FREEBAYES_variant_calling", mode:'copy'
+
+    input:
+    tuple val(sampleID), file(sampleFile), file(sampleIndex)
+    path(indexDir)
+
+    output:
+    tuple val(sampleID), file('*_variants.vcf')
+
+    script:
+    """
+    freebayes-parallel <(fasta_generate_regions.py ${indexDir}/*.fai 1000000) 5 \
+            -f ${indexDir}/*.fasta ${sampleID}_recal.bam > ${sampleID}_variants.vcf
+    """
+}
+
 println "Execution starts!"
 
 workflow {
@@ -255,6 +354,7 @@ workflow {
     refGenome = file("${params.genome}")
 	indexDir = Channel.value("${params.indexDir}")
     knownSites = file("${params.knownSites}")
+    pedFile = file("${params.pedigree}")
 
     trim_ch = TRIMMING(reads_ch)
     fastqc_ch = FASTQC(reads_ch.join(trim_ch))
@@ -265,4 +365,8 @@ workflow {
     dupl_ch = MARK_DUPLICATES(rg_ch)
     recal_ch = BASERECALIBRATION(dupl_ch, indexDir, knownSites)
     corr_ch = BQSR(dupl_ch.join(recal_ch), indexDir)
+    fam_ch = FAMILY_CALL(recal_ch.join(corr_ch), pedFile, indexDir)
+    cohort_ch = COHORT_COMB(fam_ch, indexDir)
+
+    vcFB_ch = FREEBAYES(corr_ch, indexDir)
 }
