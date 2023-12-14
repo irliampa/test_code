@@ -5,11 +5,11 @@
  * Workflow parameters
  */
 
-params.reads = "$projectDir/data"
-params.pedigree = "$projectDir/data/pedigree.ped"
-params.outDir = "$projectDir/results"
-params.indexDir = "$projectDir/ref"
-params.genome = "$projectDir/ref/Homo_sapiens_assembly19.fasta"
+params.reads = "$projectDir/test_data/data"
+params.pedigree = "$projectDir/test_data/data/pedigree.ped"
+params.outDir = "$projectDir/test_data/results"
+params.indexDir = "$projectDir/test_data/ref"
+params.genome = "$projectDir/test_data/ref/hg19_chr8.fasta"
 
  log.info """\
     VARIANT CALLING - N F   P I P E L I N E
@@ -48,7 +48,7 @@ process TRIMMING {
                 ${reads[0]} ${reads[1]} \
                 $fq_1_paired $fq_1_unpaired \
                 $fq_2_paired $fq_2_unpaired \
-                HEADCROP:15 SLIDINGWINDOW:4:20 MINLEN:25
+                HEADCROP:5 SLIDINGWINDOW:4:30 MINLEN:25
     """
 
 }
@@ -63,7 +63,7 @@ process FASTQC {
 	cpus 2
 
 	input:
-	tuple val(sampleID), path(reads)
+	tuple val(sampleID), path(reads), path(trimmed)
 
 	output:
 	path "fastqc_${sampleID}"
@@ -72,6 +72,7 @@ process FASTQC {
     """
 	mkdir fastqc_${sampleID}
 	fastqc -q ${reads} -t ${task.cpus} -o fastqc_${sampleID}
+    fastqc -q ${trimmed} -t ${task.cpus} -o fastqc_${sampleID}
 	"""
 }
 
@@ -97,6 +98,103 @@ process MULTIQC {
 } 
 
 
+/*
+ * Align reads to reference FASTA with BWA MEM
+ */
+
+process ALIGNMENT {
+    publishDir "${params.outDir}/aligned", mode:'copy'
+    cpus 4
+
+    input:
+    tuple val(sampleID), path(trimmed)
+    path(refGenome)
+    path(indexDir)
+
+    output:
+    tuple val(sampleID), path('*.sam')
+
+    script:
+    """
+    mkdir aligned
+    bwa mem -M -P -t ${task.cpus} ref/${refGenome} ${trimmed[0]} ${trimmed[2]}  > ${sampleID}_aln.sam
+    """
+}
+
+
+/*
+ * Convert SAM files to sorted BAM files using samtools
+ */
+
+process SAM_TO_BAM {
+    publishDir "${params.outDir}/aligned", mode:'copy'
+
+    input:
+    tuple val(sampleID), path(aligned)
+
+    output:
+    tuple val(sampleID), path('*_sorted.bam')
+
+    script:
+    """
+    samtools view -Sb ${aligned} > ${aligned.baseName}.bam
+    samtools sort ${aligned.baseName}.bam -O bam > ${aligned.baseName}_sorted.bam
+    """
+}
+
+
+/*
+ * Add Read Group information to BAM files
+ */
+
+process ADD_READGROUPS {
+    publishDir "${params.outDir}/aligned", mode:'copy'
+
+    input:
+    tuple val(sampleID), path(sorted)
+    path(refGenome)
+
+    output:
+    tuple val(sampleID), path('*_rg.bam') 
+
+    script:
+    """ 
+    /gatk/gatk AddOrReplaceReadGroups \
+        --INPUT ${sorted} \
+        --OUTPUT ${sampleID}_sorted_rg.bam \
+        --RGID ${sampleID} \
+        --RGLB ${sampleID} \
+        --RGPL ILLUMINA \
+        --RGPU unit \
+        --RGSM ${sampleID} \
+        --SORT_ORDER coordinate \
+        -R ${refGenome}
+    """
+}
+
+
+process MARK_DUPLICATES {
+    publishDir "${params.outDir}/aligned", mode:'copy'
+
+    input:
+    tuple val(sampleID), path(sampleFile)
+
+    output:
+    tuple val(sampleID), path('*_dupl.bam'), path('*dupl.bai'), path('*_dupl_metrics.txt')
+
+    script:
+    """ 
+    /gatk/gatk MarkDuplicates \
+        --INPUT ${sampleID}_sorted_rg.bam \
+        --OUTPUT ${sampleID}_dupl.bam \
+        --METRICS_FILE ${sampleID}_dupl_metrics.txt \
+        --ASSUME_SORT_ORDER coordinate \
+        --CREATE_INDEX true \
+        --java-options '-Xmx6g'
+    """
+}
+
+
 println "Execution starts!"
 
 workflow {
@@ -107,10 +205,13 @@ workflow {
     refGenome = file("${params.genome}")
 	indexDir = Channel.value("${params.indexDir}")
 
-    trim_ch = TRIM(reads_ch)
+    trim_ch = TRIMMING(reads_ch)
+    trim_ch.view()
     fastqc_ch = FASTQC(reads_ch.join(trim_ch))
-    align_ch = ALIGN(trim_ch, refGenome, index_ch)
     MULTIQC(fastqc_ch.collect())
-    
+    align_ch = ALIGNMENT(trim_ch, refGenome, indexDir)
+    convert_ch = SAM_TO_BAM(align_ch)
+    rg_ch = ADD_READGROUPS(convert_ch, refGenome)
+    dupl_ch = MARK_DUPLICATES(rg_ch)
 
 }
