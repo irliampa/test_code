@@ -279,7 +279,7 @@ process FAMILY_CALL {
 
     script:
     """
-    /gatk/gatk  HaplotypeCaller  \
+    /gatk/gatk HaplotypeCaller  \
         --input ${sampleID}_recal.bam \
         --output ${sampleID}_familyvariants.g.vcf \
         --pedigree ${pedFile} \
@@ -300,7 +300,7 @@ process COHORT_COMB {
     publishDir "${params.outDir}/GATK_variant_calling", mode:'copy'
 
     input:
-    tuple val(sampleID), path(gVCFFile), path(gVCFIndex)
+    tuple val(sampleID), val(familyID), val(sample), val(fatherID), val(motherID), val(sex), val(status), path(gVCFfiles), path(gVCFindex)
     path(indexDir)
 
     output:
@@ -311,8 +311,10 @@ process COHORT_COMB {
 
     script:
     """
-    /gatk/gatk  CombineGVCFs \
-        --variant ${sampleID}_familyvariants.g.vcf \
+    /gatk/gatk CombineGVCFs \
+        --variant ${sampleID[0]}_familyvariants.g.vcf \
+        --variant ${sampleID[1]}_familyvariants.g.vcf \
+        --variant ${sampleID[2]}_familyvariants.g.vcf \
         --reference ${indexDir}/*.fasta \
         --output cohort.g.vcf.gz
     /gatk/gatk GenotypeGVCFs \
@@ -355,6 +357,9 @@ workflow {
 	indexDir = Channel.value("${params.indexDir}")
     knownSites = file("${params.knownSites}")
     pedFile = file("${params.pedigree}")
+    ped_ch = Channel.fromPath("${params.pedigree}", checkIfExists: true)
+                    .splitText( each:{ it.split() } )
+                    .map { tuple( it[1], *it)} 
 
     trim_ch = TRIMMING(reads_ch)
     fastqc_ch = FASTQC(reads_ch.join(trim_ch))
@@ -366,7 +371,7 @@ workflow {
     recal_ch = BASERECALIBRATION(dupl_ch, indexDir, knownSites)
     corr_ch = BQSR(dupl_ch.join(recal_ch), indexDir)
     fam_ch = FAMILY_CALL(recal_ch.join(corr_ch), pedFile, indexDir)
-    cohort_ch = COHORT_COMB(fam_ch, indexDir)
+    cohort_ch = COHORT_COMB(ped_ch.join(fam_ch).groupTuple( by: 1 ), indexDir)
 
     vcFB_ch = FREEBAYES(corr_ch, indexDir)
 }
